@@ -1,0 +1,573 @@
+import React, { useCallback, useEffect, useState } from "react";
+import { ActionList, Icon, IndexTable, Link, Popover, Text, TextField, } from "@shopify/polaris";
+import { DeleteMinor, EditMinor, ReplaceMajor, ViewMinor, } from "@shopify/polaris-icons";
+import FolderFileIcon from "../../../../../../assets/folder-icon.svg";
+import JpgFileIcon from "../../../../../../assets/jpg-files.svg";
+import keyIcon from "../../../../../../assets/key.svg";
+import Mp3FileIcon from "../../../../../../assets/mp3-file-icon.svg";
+import Mp4FileIcon from "../../../../../../assets/mp4-file-icon.svg";
+import PdfFileIcon from "../../../../../../assets/pdf-file-icon.svg";
+import PngFileIcon from "../../../../../../assets/png-file-icon.svg";
+import XlsFileIcon from "../../../../../../assets/xls-file-icon.svg";
+import Pagination from "../../../../components/Pagination/Pagination";
+import Filter from "./partials/Filter";
+import { NoteMinor } from "@shopify/polaris-icons";
+import { cloneDeep, debounce, findIndex, forEach, remove } from "lodash";
+import { useSelector, useDispatch } from "react-redux";
+import additionalTranslations from "../../../../locals/translation";
+import { useNavigate } from "@shopify/app-bridge-react"
+// Services....
+import { _contentService } from "../../Content.service";
+import { format, parseISO } from "date-fns";
+import usePaginateHook from "../../../../hooks/usePaginateHook";
+import ContentUploader from "../../../../components/ContentUploader/ContentUploader";
+import { toast } from "react-toastify";
+import PopoverModal from "../../../../components/Modal/Modal";
+import SkeletonContent from "../../../../Skeleton/SkeletonContentFiles";
+
+function Files() {
+
+
+    // loading
+    const [loading, setLoading] = useState(true);
+
+    // localization
+    const languageSelector = useSelector(
+        (state) => state?.localization?.selectedLang
+    );
+    const translations =
+        additionalTranslations[languageSelector]?.Contents?.FilesContent;
+
+    // Title, FileName & Description
+    const editFieldData = {
+        title: '',
+        filename: '',
+        description: ''
+    }
+    const [editFileData, setEditFileData] = useState(editFieldData);
+
+    const [fileData, setFileData] = useState([]);
+
+    const files$ = useSelector((state) => state);
+    const dispatch = useDispatch();
+    const sortableColumns = [
+        "filename",
+        null,
+        null,
+        "created_at",
+        "total_downaloads",
+    ];
+
+    const navigate = useNavigate();
+
+    const [currentPage, setCurrentPage] = useState(1);
+    const [upload, setUpload] = useState([]);
+    const [product, setProduct] = useState(true);
+    const [active, setActive] = useState();
+    const [isReplaceModalOpen, setIsRepalceModalOpen] = useState(true);
+    const [replaceFileId, setReplaceFileId] = useState(null);
+
+    const defaultSort = {
+        column: "created_at",
+        direction: "descending",
+    };
+    const [sort, setSort] = useState(defaultSort);
+
+    const defaultFilter = {
+        query: "",
+        fileType: [],
+        date: null,
+        isDateFilter: false,
+    };
+    const [filter, setFilter] = useState(defaultFilter);
+
+    const { paginationData, setPaginationData } = usePaginateHook();
+    const [filesData, setFilesData] = useState([]);
+
+    const init = debounce(() => {
+        console.log(filter);
+        const payload = {
+            ...filter,
+            sort: {
+                ...sort,
+            },
+        };
+        _contentService
+            .getFiles(currentPage, payload)
+            .then((response) => {
+                const res = response.data.data;
+                console.log("=========> Saved Files....", res.data);
+                setFilesData(res.data);
+                setPaginationData({
+                    current_page: res.current_page,
+                    last_page: res.last_page,
+                    per_page: res.per_page,
+                    from: res.from,
+                    to: res.to,
+                    total: res.total,
+                    links: res.links,
+                });
+                setLoading(false);
+            })
+            .catch((err) => {
+                console.log(err);
+                setLoading(true);
+            });
+    }, 300);
+
+    useEffect(() => {
+        init();
+    }, [filter, sort, currentPage]);
+
+    const handleSortChange = useCallback((headingIndex, direction) => {
+        setSort((prevState) => {
+            if (
+                sortableColumns.indexOf(prevState.column) === headingIndex &&
+                direction === "descending"
+            ) {
+                return defaultSort;
+            } else {
+                return {
+                    column: sortableColumns[headingIndex],
+                    direction: direction,
+                };
+            }
+        });
+        setCurrentPage(1);
+    }, []);
+
+    const FILE_TYPES = {
+        JPG: JpgFileIcon,
+        JPEG: JpgFileIcon,
+        MP3: Mp3FileIcon,
+        MP4: Mp4FileIcon,
+        PDF: PdfFileIcon,
+        PNG: PngFileIcon,
+        XLS: XlsFileIcon,
+        Folder: FolderFileIcon,
+    };
+
+    const resourceName = {
+        singular: "File",
+        plural: "Files",
+    };
+    const toggleActive = useCallback(
+        (index) => {
+            console.log('======== index', index);
+            active !== index ? setActive(index) : setActive();
+        },
+        [active]
+    );
+
+    function prepareAssociatedProduts(products) {
+        const actionList = [];
+        forEach(products, (product) => {
+            actionList.push({
+                // active: t,
+                content: (
+                    <Link target="_blank" onClick={()=> navigate(`https://admin.shopify.com/products/${product.shopify_product_id}`)}>
+                        { product.name }
+                    </Link>
+                )
+            });
+        });
+        return actionList;
+    }
+
+
+    // delete modal
+    const [deleteModal, setDeleteModal] = useState(false);
+    const [fileId, setFileId] = useState();
+
+    // open and close model
+    const cancleHandleChange = () => {
+        setDeleteModal(false);
+    }
+
+    const deleteFile = useCallback((id) => {
+        setDeleteModal(true);
+        setFileId(id);
+    }, [deleteModal, fileId])
+
+    // delete on click
+    function deleteFileHandle() {
+        console.log(fileId, 'fileId');
+        _contentService.deleteFile(fileId).then((response) => {
+            const res = response.data;
+            setDeleteModal(false);
+            toast.success(res.message);
+            const filesDataCopy = cloneDeep(filesData);
+            remove(filesDataCopy,{ 'id': parseInt(fileId)});
+            setFilesData([...filesDataCopy]);
+        }).catch((error) => {
+            const err = error.response.data
+            if (err.status == 406) {
+                toast.info(err.message);
+            }
+            else{
+                toast.info(err.message);
+            }
+            setDeleteModal(false);
+        });
+    }
+
+    // replace files
+    const [replaceUpload, setReplaceUpload] = useState([]);
+    const [replaceFileModel, setReplaceFileModel] = useState(false);
+
+    const handleChange = useCallback(() => setReplaceFileModel(!replaceFileModel), [replaceFileModel]);
+
+    const replaceFilesModel = useCallback((id, filename) => {
+        setReplaceFileModel(true);
+        setReplaceFileId(id);
+    },[replaceFileModel, replaceFileId])
+
+    // modal add files
+
+    const replaceAllFiles = useCallback(() => {
+        setReplaceFileModel(false);
+        setReplaceUpload([]);
+    }, [filesData, fileData]);
+
+    // files replace & add files
+    useEffect(() => {
+        const index = findIndex(filesData, { id: parseInt(fileData?.id) });
+        if (index !== -1) {
+            const newData = [...filesData];
+            newData[index] = {
+                ...newData[index],
+                filename: fileData?.filename,
+            };
+            setFilesData(newData);
+        }else{
+            setFilesData((prevState) => [fileData, ...prevState])
+        }
+    }, [fileData])
+
+
+    // edit files
+    const [editId, setEditId] = useState(null);
+    const [editFileName, setEditFIleName] = useState('');
+    const [editModel, setEditModel] = useState(false);
+
+    const editFileModal = useCallback((id, filename, description, title) => {
+        setEditModel(true);
+        setEditId(id);
+        setEditFIleName(filename);
+        setEditFileData({...editFileData,  filename: filename, title: title, description: description })
+    }, [editModel, editId, editFileName])
+
+    const closeEditFileModal = () => {
+        setEditModel(false);
+        setEditFileData(editFieldData);
+    }
+
+    // Update File API
+    const updateFile = useCallback(() => {
+
+        const payload = {
+            title: editFileData.title,
+            filename: editFileData.filename,
+            description: editFileData.description
+        }
+
+        if(editFileData.title && editFileData.filename && editFileData.description){
+            _contentService.updateFile(editId, payload).then((response) =>{
+                const res = response.data;
+                closeEditFileModal();
+                const index = findIndex(filesData, { id: parseInt(editId) });
+                if (index !== -1) {
+                    const newData = [...filesData];
+                    newData[index] = {
+                        ...newData[index],
+                        title: editFileData.title,
+                        filename: editFileData.filename,
+                        description: editFileData.description
+                    };
+                    setFilesData(newData);
+                }
+                toast.success(res.message);
+            }).catch((error) => {
+                const res = error.response?.data;
+                toast.error(error.message);
+            });
+        }else{
+            toast.error("Please fill all the field");
+        }
+
+    }, [editFileData, filesData, editId]);
+
+
+    const rowMarkup = filesData?.map(
+        ({ id, filename, type, associated_products, created_at, total_download, license_key, action, description, title }, index
+        ) => (
+            <IndexTable.Row id={id} key={id} position={index}>
+                <IndexTable.Cell>
+                    <Text as="h6"> {filename} </Text>
+                </IndexTable.Cell>
+                <IndexTable.Cell>
+                    <div className="file_type_cell">
+                        {FILE_TYPES[type] ? (
+                            <img src={FILE_TYPES[type]} alt="icon" />
+                        ) : (
+                            <div style={{ margin: 0 }}>
+                                <Icon source={NoteMinor} color="base" />
+                            </div>
+                        )}
+                        <Text as="p">{type}</Text>
+                    </div>
+                </IndexTable.Cell>
+
+                <IndexTable.Cell>
+                    {associated_products?.length > 1 ? (
+                        <Popover
+                            active={active === id ? true : false}
+                            activator={
+                                <Link  onClick={() => toggleActive(id)}>
+                                    {`${associated_products.length} Products`}
+                                </Link>
+                            }
+                            autofocusTarget="first-node"
+                            onClose={toggleActive}
+                        >
+                            <ActionList
+                                actionRole="menuitem"
+                                items={prepareAssociatedProduts(associated_products)}
+                            />
+                        </Popover>
+                    ) : associated_products?.length == 1 ? (
+                        <Link target="_blank" onClick={
+                            ()=> navigate(`https://admin.shopify.com/products/${associated_products[0].shopify_product_id}`) }>
+                                {associated_products[0].name || "-"}
+                        </Link>
+                    ) :
+                       <>{"-"}</>
+                    }
+                </IndexTable.Cell>
+
+                <IndexTable.Cell>
+                    <Text as="p">
+                        {created_at && format(parseISO(created_at), "dd LLL, yyyy")}
+                    </Text>
+                </IndexTable.Cell>
+                <IndexTable.Cell>
+                    <div className="downloads_cell">
+                        <Text as="p">{total_download}</Text>
+                    </div>
+                </IndexTable.Cell>
+                <IndexTable.Cell>
+                    <div className="key_cell">
+                        {license_key === "key" ? (
+                            <img src={keyIcon} alt="icon" />
+                        ) : (
+                            <p
+                                style={{
+                                    color: "#595F6A",
+                                    textAlign: "center",
+                                }}
+                            >
+                                -
+                            </p>
+                        )}
+                    </div>
+                </IndexTable.Cell>
+                <IndexTable.Cell>
+                    <div className="action_wrap">
+                        <button className="button_style replace_major_wrap" onClick={() => replaceFilesModel(id)}>
+                            <Icon source={ReplaceMajor} color="base" />
+                        </button>
+                        <button className="button_style">
+                            <Icon source={ViewMinor} color="base" />
+                        </button>
+                        <button className="button_style" onClick={() => editFileModal(id, filename, description, title)}>
+                            <Icon source={EditMinor} color="base" />
+                        </button>
+                        <button className="button_style" onClick={() => deleteFile(id)}>
+                            <Icon source={DeleteMinor} color="base" />
+                        </button>
+                    </div>
+                </IndexTable.Cell>
+            </IndexTable.Row>
+        )
+    );
+
+    // skeleton array
+    const arr = ['File Name', 'File Type', 'Associated Products', 'Date Created', 'Downloads', 'License Key', 'Actions'];
+
+    return (
+        <>
+        {
+            loading ?
+            <div className="files_tab_wrap">
+                <SkeletonContent arr={arr} />
+            </div>
+            :
+            <div className={`${ upload.length <= 1 && "only_one_file" } files_tab_wrap`} >
+                <ContentUploader
+                    showTitle={true}
+                    upload={upload}
+                    setUpload={setUpload}
+                    setFilesData={setFileData}
+                    replaceFile={false}
+                    filesData={fileData}
+                    flag={true}
+                    allowMultiple={true}
+                />
+
+                <div className="uploaded_file_wrap">
+                    <div className="file_list_row">
+                        <div className="file_list_col"></div>
+                    </div>
+                </div>
+
+                <div className="file_filter_wrap">
+                    <Filter
+                        filter={filter}
+                        setFilter={setFilter}
+                        defaultFilter={defaultFilter}
+                    />
+                </div>
+
+                <div className="file_table_wrap">
+                    <IndexTable
+                        resourceName={resourceName}
+                        itemCount={filesData.length}
+                        headings={[
+                            {
+                                id: 1,
+                                title: (
+                                    <div className="file_type_wrap">
+                                        {translations?.FileName}
+                                    </div>
+                                ),
+                            },
+                            { id: 2, title: `${translations?.FileType}` },
+                            {
+                                id: 3,
+                                title: `${translations?.AssociatedProducts}`,
+                            },
+                            {
+                                id: 4,
+                                title: `${translations?.DateCreated}`,
+                            },
+                            {
+                                id: 5,
+                                title: (
+                                    <div className="file_type_wrap center_th">
+                                        {translations?.Downloads}
+                                    </div>
+                                ),
+                            },
+                            {
+                                id: 6,
+                                title: (
+                                    <div className="file_type_wrap center_th">
+                                        {translations?.LicenseKey}
+                                    </div>
+                                ),
+                            },
+                            { id: 7, title: "" },
+                        ]}
+                        selectable={false}
+                        sortable={[true, false, false, true, true, false]}
+                        sortDirection={sort?.direction}
+                        sortColumnIndex={sortableColumns.indexOf(
+                            sort?.column
+                        )}
+                        onSort={handleSortChange}
+                    >
+                        {rowMarkup}
+                    </IndexTable>
+
+                    {/* pagination */}
+                    {filesData.length ?
+                        <div className="file_pagination_wrap">
+                            {paginationData.links.length ? (
+                                <Pagination
+                                    config={paginationData}
+                                    currentPage={currentPage}
+                                    setCurrentPage={setCurrentPage}
+                                />
+                            ) : (
+                                <></>
+                            )}
+                        </div>
+                        :''
+                    }
+                </div>
+
+                {/* Delete Model */}
+                <PopoverModal width={true} title="Delete Confirmation" open={deleteModal} cancle="Cancle" confirmation="Delete"
+                cancleHandleChange={cancleHandleChange} body={`Are you sure you want to delete the file?`} deleteHandle={deleteFileHandle} />
+
+                {/* replace file */}
+                <PopoverModal
+                    width={false}
+                    title="Replace File"
+                    open={replaceFileModel}
+                    cancle="Cancle"
+                    confirmation="ReplaceFile"
+                    cancleHandleChange={handleChange}
+                    body={
+                        <ContentUploader
+                            showTitle={false}
+                            upload={replaceUpload}
+                            setUpload={setReplaceUpload}
+                            setFilesData={setFileData}
+                            productId={replaceFileId}
+                            replaceFile={true}
+                            filesData={fileData}
+                            flag={true}
+                            allowMultiple={false}
+                        />
+                    }
+                    deleteHandle={replaceAllFiles}
+                />
+
+                {/* edit file */}
+                <PopoverModal
+                    width={true}
+                    title="Edit File"
+                    open={editModel}
+                    cancle="Cancel"
+                    confirmation="Update"
+                    cancleHandleChange={closeEditFileModal}
+                    body={
+                        <div className="edit_files_model">
+                            <div className="input_text_field_block">
+                                <TextField
+                                    label="Title"
+                                    value={editFileData.title}
+                                    onChange={(newValue) => setEditFileData({...editFileData,  title: newValue})}
+                                    autoComplete="off"
+                                    />
+                            </div>
+                            <div className="input_text_field_block">
+                                <TextField
+                                    label="File Name"
+                                    value={editFileData.filename}
+                                    onChange={(newValue) => setEditFileData({...editFileData,  filename: newValue})}
+                                    autoComplete="off"
+                                    />
+                            </div>
+                            <div className="input_text_field_block">
+                                <TextField
+                                    label="Description"
+                                    value={editFileData.description}
+                                    onChange={(newValue) => setEditFileData({...editFileData,  description: newValue})}
+                                    autoComplete="off"
+                                    multiline={3}
+                                    />
+                            </div>
+                        </div>
+                    }
+                    deleteHandle={updateFile}
+                />
+
+            </div>
+        }
+        </>
+    );
+}
+
+export default Files;

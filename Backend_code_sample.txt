@@ -1,0 +1,375 @@
+<?php
+
+namespace App\Http\Controllers\Files;
+
+use App\Http\Controllers\Controller;
+use App\Models\Chunk;
+use App\Models\DdFile;
+use App\Models\Product;
+use App\Models\ProductFile;
+use App\Models\Shop;
+use App\Traits\AwsTrait;
+use App\Traits\CommonTrait;
+use Carbon\Carbon;
+use Exception;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+use \AshAllenDesign\ShortURL\Classes\Builder;
+
+class FilesController extends Controller
+{
+    use AwsTrait;
+    use CommonTrait;
+
+    public function index(Request $request) {
+        $shop = $this->getShop($request->user()->id);
+        try {
+            infoLog("Get File Records", LOG_LEVEL_START);
+            $files = DdFile::query();
+
+            $files = $files->where('shop_id', $shop->id);
+
+            if(!empty($request->input('query'))) {
+                $files = $files->where('filename' , 'like', '%'.$request->input('query').'%')
+                    ->orWhere('title', 'like', $request->input('query'));
+            }
+
+            if(count($request->fileType) > 0) {
+                $files = $files->whereIn('type', $request->fileType);
+            }
+
+            if(isset($request->date['start']) && isset($request->date['end'])) {
+                $files = $files->whereBetween('created_at', [Carbon::createFromDate($request->date['start'])->startOfDay(), Carbon::createFromDate($request->date['end'])->endOfDay()]);
+            }
+
+            $files = $files->with('associatedProducts');
+            $files = $files->orderBy($request->input('sort')['column'], $request->input('sort')['direction'] == 'descending' ? 'desc': 'asc')->paginate(10);
+
+            $this->ddLogActivity($shop->id, "Get File records");
+            infoLog("Get File Records", LOG_LEVEL_END);
+            return success("Files data fetched successfully", $files);
+        } catch (Exception $e) {
+            $this->ddLogActivity($shop->id, "Get File records");
+            infoLog("Get File Records", LOG_LEVEL_ERROR, $e);
+            return error("Something went wrong...", $e);
+        }
+    }
+
+    public function update(Request $request, DdFile $file) {
+        $shop = $this->getShop($request->user()->id);
+        try {
+            infoLog("Update file details", LOG_LEVEL_START);
+            $input = $request->only(['type','title','filename', 'description']);
+            $file->update($input);
+
+            $this->ddLogActivity($shop->id, "Update file details", true, [['module' => FILE, 'id' => $file->id]], STORE_UPDATE);
+            infoLog("Update file details", LOG_LEVEL_END);
+            return success('File data updated successfully...');
+        } catch(Exception $e) {
+            $this->ddLogActivity($shop->id, "Update file details", false, [['module' => FILE, 'id' => $file->id]], STORE_UPDATE);
+            infoLog("Update file details", LOG_LEVEL_ERROR, $e->getMessage());
+            return error('Something went wrong', $e);
+        }
+    }
+
+    public function getFilesList(Request $request, $product_id) {
+        try {
+            infoLog("Get files list", LOG_LEVEL_START);
+            $shop = $this->getShop($request->user()->id);
+
+            $linkedFiles = ProductFile::where('product_id', $product_id)->pluck('file_id')->toArray();
+            $files = DdFile::where('shop_id', $shop->id)->whereNotIn('id', $linkedFiles)->select('id as value', 'filename as label')->get();
+
+            $this->ddLogActivity($shop->id, "Get File List");
+            infoLog("Get files list", LOG_LEVEL_END);
+            return success('Files list successfully...', $files);
+        } catch (Exception $e) {
+            $this->ddLogActivity($shop->id, "Get File List", false);
+            infoLog("Get files list", LOG_LEVEL_ERROR, $e->getMessage());
+            return error('Something went wrong', $e);
+        }
+    }
+
+    public function deleteFile(Request $request, DdFile $file) {
+        $shop = $this->getShop($request->user()->id);
+        try {
+            infoLog("Delete File Function", LOG_LEVEL_START);
+            // TODO:: Check file is not already not linked with some product...
+            $associatedProductFile =  ProductFile::where('file_id',$file->id)->count();
+
+            if($associatedProductFile > 0) {
+                $msg = $associatedProductFile > 1 ? "Unable to delete the file, File has linked with $associatedProductFile products." : "Unable to delete the file, File has linked with $associatedProductFile product.";
+                return error($msg, null, 406);
+            }
+            // TODO :: Delete file from aws s3....
+
+            logger('=========== File deleting from ');
+            logger($file);
+            $key = $request->user()->name . '/' . $file->filename;
+            logger($key);
+            $res = Storage::disk('s3')->delete($key);
+            $file->delete();
+            logger($res);
+            $this->ddLogActivity($shop->id, "Delete File", true, [['module' => FILE, 'id' => $file->id]], STORE_UPDATE);
+            infoLog("Delete File Function", LOG_LEVEL_END);
+            return success('File deleted successfully...');
+        } catch(Exception $e) {
+            $this->ddLogActivity($shop->id, "Delete File", false, [['module' => FILE, 'id' => $file->id]], STORE_UPDATE);
+            infoLog("Delete File Function", LOG_LEVEL_ERROR, $e->getMessage());
+            return error('Something went wrong', $e);
+        }
+
+    }
+
+
+
+    public function initiateUpload(Request $request) {
+        $shop = $this->getShop($request->user()->id);
+        try {
+            infoLog('Initiate Upload', LOG_LEVEL_START);
+            $fileName = $request->fileName;
+            $params = [
+                "Bucket" => $this->getBucketName(),
+                "Key" =>  $request->user()->name .'/' . $fileName
+            ];
+            $uploader = $this->initiateUploadH($params);
+            logger($uploader);
+
+            $this->ddLogActivity($shop->id, "Initiate Upload");
+            infoLog('Initiate Upload', LOG_LEVEL_END);
+            return success('Upload initited suceessfully', ["uploadId" => $uploader['UploadId']]);
+        } catch (Exception $e) {
+            $this->ddLogActivity($shop->id, "Initiate Upload", false);
+            infoLog('Initiate Upload', LOG_LEVEL_ERROR, $e);
+            return error("Error while initited upload", $e->getMessage());
+        }
+    }
+
+    public function uploadChunk(Request $request) {
+        try {
+            infoLog('Upload Chunk', LOG_LEVEL_START);
+
+            $chunk = new Chunk();
+            $chunk->current_index = $request->current_index;
+            $chunk->total_chunks = $request->total_chunks;
+            // $chunk->uid = $uid;
+            $chunk->file_name = $request->file_name;
+            $chunk->file_type = $request->file('chunk')->getClientOriginalExtension();
+            $chunk->status = 1;
+            $chunk->save();
+
+
+            $params = [
+                "Bucket" => $this->getBucketName(),
+                "Key" =>  $request->user()->name .'/' . $request->file_name,
+                "Body" => $request->file('chunk')->getContent(),
+                // "Content-Length" => $request->file('chunk')->getSize(),
+                "PartNumber" => 1 + $request->current_index,
+                "UploadId" => $request->uploadId
+            ];
+            $res = $this->uploadChunkH($params);
+            logger('================= Upload Part Response');
+            logger($res);
+            infoLog('Upload Chunk', LOG_LEVEL_END);
+            return success("Chunk Uploaded successfully");
+        } catch (Exception $e) {
+            logger($e->getMessage());
+            infoLog('Upload Chunk', LOG_LEVEL_ERROR, $e);
+            return error("Error while uploading chunk", $e->getMessage());
+        }
+    }
+
+
+    public function uploadComplete(Request $request) {
+        $shop = $this->getShop($request->user()->id);
+        try {
+            infoLog('Upload Complete', LOG_LEVEL_START);
+
+            $params = [
+                "Bucket" => $this->getBucketName(),
+                "Key" =>  $request->user()->name .'/' . $request->fileName,
+                "UploadId" => $request->uploadId
+            ];
+
+            $completMultipartUplaodRes = $this->uploadCompleteH($params);
+
+            $user = $request->user();
+            $shop = Shop::where('user_id', $user->id)->first();
+            $fileNameExplode = explode('.', $request->fileName);
+
+            $isFileExists = key_exists('isReplaceRequest', $request->all()) && $request->isReplaceRequest && key_exists('fileId', $request->all()) && $request->fileId;
+
+            if($isFileExists) {
+                $file = DdFile::where('id', $request->fileId)->first();
+            } else {
+                $file = new DdFile();
+            }
+
+            $file->shop_id = $shop->id;
+            $file->type = strtoupper(end($fileNameExplode));
+            $file->filename = $request->fileName;
+            $file->s3_id = $completMultipartUplaodRes['Key'];
+            $file->s3_url = $completMultipartUplaodRes['Location'];
+            $file->size = $request->size;
+            $file->save();
+
+
+            // Check file upload from product page then link file with product
+            if(key_exists('productId', $request->all()) && $request->productId ) {
+                logger('======== Linking file with product');
+                $productFile = new ProductFile();
+                $productFile->shop_id = $shop->id;
+                $productFile->product_id = $request->productId;
+                $productFile->file_id = $file->id;
+                $productFile->save();
+
+                $product = Product::where('id', $request->productId)->first();
+                $this->createFileConfigRecord($product, $productFile->id);
+
+                $file['pivot'] = [
+                    "product_id" => (int) $request->productId,
+                    "file_id" => $file->id,
+                ];
+                $file['product_file_id'] = $productFile->id;
+
+                // Mark file steps products as completed
+                $this->markOnboardingStepAsDone($shop, 'step_products');
+                logger('======== Successfully linked with product');
+            }
+
+            logger("============= Complet Multipart Uplaod Res");
+            logger($completMultipartUplaodRes);
+            $file['associated_products'] = [];
+            $file['total_download'] = 0;
+
+            if ($request->isReplacerequest) {
+                return success("File replaced successfully", ['file'=> $file]);
+            }
+
+            // Mark file upload step as completed
+            $this->markOnboardingStepAsDone($shop, 'step_upload');
+
+            $this->ddLogActivity($shop->id, "Complete file upload", true, [['module' => FILE, 'id' => $file->id]], STORE_UPDATE);
+            infoLog('Upload Complete', LOG_LEVEL_END);
+            return success("File uploaded successfully", ['file'=> $file]);
+        } catch (Exception $e) {
+            $this->ddLogActivity($shop->id, "Complete file upload", false, [['module' => FILE, 'id' => $file->id]], STORE_UPDATE);
+            infoLog('Upload Complete', LOG_LEVEL_ERROR, $e);
+            return error("Something went wrong when complete upload");
+        }
+    }
+
+    public function uploadFile($fileName, $path='tmp') {
+        ini_set('memory_limit', '-1');
+        try {
+        	$file = fopen(Storage::path("$path/$fileName"), 'ab');
+
+            $chunks = Chunk::where('file_name', $fileName)->where('status', 1)->orderBy('current_index', 'asc')->get();
+            foreach ($chunks as $i => $chunk) {
+                logger("========> Merge chunk number:: ". $chunk->current_index);
+                $chunkSize = Storage::size("chunks/" . $chunk->uid);
+                $chunk = fopen(Storage::path("chunks/" . $chunk->uid), 'rb');
+                $buff = fread($chunk, $chunkSize);
+                fwrite($file, $buff);
+            }
+
+            //Upload File to aws
+            $this->uploadToAWS('test-upload', $fileName, "$path/$fileName");
+
+            $this->removeTempFile($fileName);
+            fclose($file);
+
+
+
+            return response()->json("File Stored in temp storage sucessfully");
+        } catch (Exception $e) {
+            logger($e->getMessage());
+        }
+    }
+
+    public function removeTempFile($fileName) {
+        //delete chunk files
+        $uids = Chunk::where('file_name', $fileName)->where('status', 1)->orderBy('current_index', 'asc')->pluck('uid')->toArray();
+        array_map(function($value, $key) {  return  'chunks/' . $value; }, $uids);
+        logger('============== UIDS');
+        logger($uids);
+        Storage::delete($uids);
+    }
+
+
+    public function fileUploadStatus(Request $request) {
+        try {
+            $status = $request->status;
+            $fileName = $request->fileName;
+            if ($status == 1) {
+                //? Upload file to aws
+                $this->uploadFile($fileName);
+                return response()->json("File Stored with status 1 sucessfully");
+            } else {
+                return response()->json("File Stored with status 0 sucessfully");
+            }
+        } catch (Exception $e) {
+            logger($e->getMessage());
+        }
+    }
+
+    public function downloadFile(Request $request) {
+        $shop = $this->getShop($request->user()->id);
+        try {
+            infoLog('Download File', LOG_LEVEL_START);
+
+            $key = isset($request->key) ? $request->key : "digital-downloads-development.myshopify.com/env.png";
+
+            $s3 = $this->getS3Client();
+
+            $payload = $s3->getCommand('GetObject', [
+                'Bucket' => $this->getBucketName(),
+                'Key'    => $key
+            ]);
+
+            $presignedUrlResult = $s3->createPresignedRequest($payload, Carbon::now()->addMinutes());
+
+            // $presignedUrlResult = $s3->generate_presigned_url
+            $presignedUrl = (string)$presignedUrlResult->getUri();
+            // Display the object in the browser.
+            logger('=====================>>> Result');
+            logger($presignedUrl);
+
+            $builder = new Builder();
+            $shortURLObject = $builder->destinationUrl($presignedUrl);
+
+
+            // Set availability of download file
+            if($request->availability && $request->availability['key'] == 'date') {
+                $shortURLObject = $shortURLObject->activateAt(Carbon::date($request->availability['value']));
+            }
+
+            // Set link exipers span of download file
+            if($request->expires && $request->expires['key'] == 'numOfDays') {
+                $shortURLObject = $shortURLObject->deactivateAt(Carbon::now()->addDays($request->expires['value']));
+            } else if ($request->expires && $request->expires['key'] == 'date') {
+                $shortURLObject = $shortURLObject->deactivateAt(Carbon::date($request->expires['value']));
+            }
+
+            // Temp
+            $shortURLObject = $shortURLObject->deactivateAt(Carbon::now()->addMinutes());
+
+
+            $shortURLObject = $shortURLObject->redirectStatusCode(302)->make();
+
+            logger('================= Short url object');
+            logger(json_encode($shortURLObject));
+
+            $shortURL = $shortURLObject->default_short_url;
+
+            $this->ddLogActivity($shop->id, "Download File");
+            infoLog('Download File', LOG_LEVEL_END);
+            return success('Downaload like generated successfully', $shortURL);
+        } catch (Exception $e) {
+            $this->ddLogActivity($shop->id, "Download File");
+            infoLog('Download File', LOG_LEVEL_ERROR, $e);
+            logger($e->getMessage());
+            return error("Error while download content", $e->getMessage());
+        }
+    }
+}

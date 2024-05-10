@@ -1,0 +1,28 @@
+{
+  "name": "free-shipping",
+  "version": "1.0.0",
+  "main": "web/index.js",
+  "license": "UNLICENSED",
+  "scripts": {
+    "shopify": "shopify",
+    "build": "shopify app build",
+    "dev": "shopify app dev",
+    "info": "shopify app info",
+    "generate": "shopify app generate",
+    "deploy": "shopify app deploy"
+  },
+  "dependencies": {
+    "@shopify/app": "3.48.3",
+    "@shopify/cli": "3.48.3",
+    "@shopify/polaris": "^11.12.0",
+    "@shopify/react-form": "^2.5.5",
+    "@shopify/react-hooks": "^3.0.5"
+  },
+  "author": "MTPC-381",
+  "private": true,
+  "workspaces": [
+    "web",
+    "web/frontend",
+    "extensions/*"
+  ]
+}
